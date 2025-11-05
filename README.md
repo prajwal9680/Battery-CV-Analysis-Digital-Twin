@@ -16,3 +16,14 @@ It simulates CV curves, fits experimental data (extracts diffusion coefficient `
 
 ```bash
 python -m streamlit run cv_twin/ui/app.py --server.port 8501 --server.headless true
+```
+
+## 📂 Project Structure
+```
+cv_twin/
+  simulator/        # CV model & numerical solver
+  fitting/          # Preprocessing + curve fitting
+  qc/               # Quality check rules
+  ui/               # Streamlit user interface
+  data/sample/      # Sample CSV for testing
+```
