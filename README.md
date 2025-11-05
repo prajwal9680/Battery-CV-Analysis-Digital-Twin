@@ -15,7 +15,7 @@ It simulates CV curves, fits experimental data (extracts diffusion coefficient `
 4. In the terminal, run:
 
 ```bash
-python -m streamlit run cv_twin/ui/app.py --server.port 8501 --server.headless true
+
 cv_twin/
   simulator/        # CV model & numerical solver
   fitting/          # Preprocessing + curve fitting
