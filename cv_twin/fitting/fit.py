@@ -30,6 +30,9 @@ def fit_parameters(E_exp, I_exp, init):
     bounds = ([1e-11, -0.2], [1e-9, 0.6])
     res = least_squares(residuals, x0, bounds=bounds, xtol=1e-7, ftol=1e-7, max_nfev=40)
     D_fit, E0_fit = map(float, res.x)
+    # Warn if solution hits bounds (indicates poor fit or wrong units)
+if np.any(np.isclose(res.x, res.bounds[0])) or np.any(np.isclose(res.x, res.bounds[1])):
+    print("[fit] Warning: solution is at parameter bounds. Consider widening bounds or checking units/data.")
 
     I_fit = sim_curve(D_fit, E0_fit)
     rmse = float(np.sqrt(np.mean((I_fit - I_exp)**2)))
