@@ -7,22 +7,24 @@ def fit_parameters(E_exp, I_exp, init):
     """
     Fit D, E0, and baseline offset 'b' by minimizing the difference
     between simulated and experimental current.
-    Uses a robust least-squares loss to handle noise/outliers.
+    Uses robust least squares to handle noise and outliers.
     """
 
-    # --- parameter setup ---
+    # -------- parameter bounds --------
+    # [D,     E0,     b]
     bounds = (
-        [1e-11, -0.3, -2e-4],   # lower bounds [D, E0, b]
-        [1e-9, 0.6, 2e-4]       # upper bounds
+        [1e-11, -0.3,  -2e-4],   # lower bounds
+        [1e-9,   0.6,   2e-4]    # upper bounds
     )
 
+    # initial guess
     x0 = np.array([
-        float(init.get('D', 1e-10)),     # initial diffusion coefficient
-        float(init.get('E0', 0.1)),      # initial formal potential
-        0.0                              # baseline offset
+        float(init.get('D', 1e-10)),   # diffusion coefficient
+        float(init.get('E0', 0.1)),    # formal potential
+        0.0                             # baseline offset
     ])
 
-    # --- simulation helper ---
+    # -------- simulation helper --------
     def sim_curve(D, E0):
         params = ModelParams(
             A=init['A'], L=init['L'], Nx=int(init['Nx']), D=D,
@@ -31,34 +33,33 @@ def fit_parameters(E_exp, I_exp, init):
             scan_rate=init['scan_rate'], mode='reversible'
         )
         t, E, I_sim = simulate(params, Nt=800)
-        return np.interp(E_exp, E, I_sim)  # match exp potential grid
+        return np.interp(E_exp, E, I_sim)  # interpolate to experimental grid
 
-    # --- residual function ---
+    # -------- residuals for optimizer --------
     def residuals(theta):
         D, E0, b = theta
         I_model = sim_curve(D, E0) + b
         eps = 1e-9 + np.maximum(1e-6, np.abs(I_exp))
         return (I_model - I_exp) / eps
 
-    # --- fit using robust least squares ---
+    # -------- fit using robust least squares --------
     res = least_squares(
         residuals, x0, bounds=bounds,
         loss='soft_l1', f_scale=3e-4,
         xtol=1e-7, ftol=1e-7, max_nfev=60
     )
 
-    # --- check if bounds were hit ---
-    if np.any(if np.any(np.isclose(res.x, bounds[0])) or np.any(np.isclose(res.x, bounds[1])):
+    # warn if solution is at bounds
+    if np.any(np.isclose(res.x, bounds[0])) or np.any(np.isclose(res.x, bounds[1])):
         print("[fit] Warning: solution at parameter bounds. Check units or widen bounds.")
 
-    # --- extract parameters ---
+    # extract results
     D_fit, E0_fit, b_fit = map(float, res.x)
     I_fit = sim_curve(D_fit, E0_fit) + b_fit
 
-    # --- compute RMSE ---
-    rmse = float(np.sqrt(np.mean((I_fit - I_exp) ** 2)))
+    # RMSE
+    rmse = float(np.sqrt(np.mean((I_fit - I_exp)**2)))
 
-    # --- return results ---
     return {
         'D': D_fit,
         'E0': E0_fit,
