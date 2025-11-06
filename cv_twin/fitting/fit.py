@@ -1,6 +1,10 @@
+
+
 import numpy as np
 from scipy.optimize import least_squares
 from simulator.model import ModelParams, simulate
+
+print(">>> USING UPDATED fit.py <<<")
 
 
 def fit_parameters(E_exp, I_exp, init):
