@@ -130,6 +130,9 @@ else:
     with col2:
         file = st.file_uploader('Upload CSV (time_s, potential_V, current_A)', type=['csv'])
         if file is not None and st.button('Fit Parameters (D & E0, reversible)'):
+            units_basic = st.selectbox('Current units in CSV', ['A','mA','µA'], index=0, key='units_basic')
+            scale_basic = {'A':1.0, 'mA':1e-3, 'µA':1e-6}[units_basic]
+
             df = load_cv_csv(file); df_sw = segment_sweeps(df)[0]
             E_exp, I_exp = df_sw['potential_V'].values, df_sw['current_A'].values
             init = {'A':A,'L':L,'Nx':int(Nx),'D':D,'T':T,'n':int(n),'E0':E0,'alpha':alpha,'scan_rate':scan_rate}
