@@ -48,7 +48,7 @@ def fit_parameters(E_exp, I_exp, init):
     )
 
     # --- check if bounds were hit ---
-    if np.any(np.isclose(res.x, res.bounds[0])) or np.any(np.isclose(res.x, res.bounds[1])):
+    if np.any(if np.any(np.isclose(res.x, bounds[0])) or np.any(np.isclose(res.x, bounds[1])):
         print("[fit] Warning: solution at parameter bounds. Check units or widen bounds.")
 
     # --- extract parameters ---
