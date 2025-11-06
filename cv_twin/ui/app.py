@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 
-# Allow "from simulator..." imports to work regardless of how Streamlit runs
+# Make package imports work no matter how Streamlit runs
 project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
@@ -16,36 +16,44 @@ from fitting.preprocess import load_cv_csv, segment_sweeps
 from fitting.fit import fit_parameters
 from qc.qc_rules import qc_status
 
-# -----------------------------
-# Page setup
-# -----------------------------
+
+# =========================
+# Page & Theme
+# =========================
 st.set_page_config(page_title="CV Digital Twin", layout="wide")
-st.title("CV Digital Twin – General Electrochemistry")
+st.title("⚡ CV Digital Twin – General Electrochemistry")
 
-mode_view = st.sidebar.radio("View Mode", ["Basic", "Advanced"])
+st.caption(
+    "Simulate cyclic voltammetry, fit experimental curves (reversible model), "
+    "and assess data quality. Use the unit selector if your CSV is in mA or µA."
+)
 
-# Default parameters (sensible lab-like defaults)
+
+# =========================
+# Defaults
+# =========================
 default = dict(
-    A=1.0e-4,          # m^2
-    L=1.5e-4,          # m
+    A=1.0e-4,          # m^2 electrode area
+    L=1.5e-4,          # m diffusion length
     Nx=90,             # grid points
-    D=1.0e-10,         # m^2/s
-    E0=0.10,           # V
-    T=298.15,          # K
-    n=1,               # electrons
+    D=1.0e-10,         # m^2/s diffusion coefficient
+    E0=0.10,           # V formal potential
+    T=298.15,          # K temperature
+    n=1,               # electrons transferred
     alpha=0.5,         # transfer coefficient
     E_start=0.00,      # V
     E_vertex=0.40,     # V
     E_final=0.00,      # V
     scan_rate=0.05,    # V/s
-    k0=5e-6            # m/s (BV only)
+    k0=5e-6            # m/s (BV only, used for simulation)
 )
 
-# -----------------------------
+
+# =========================
 # Helpers
-# -----------------------------
+# =========================
 def run_sim(params, Nt=500, boundary="reversible"):
-    """Run CV simulation using ModelParams + selected boundary condition."""
+    """Run CV simulation with current parameters."""
     p = ModelParams(
         A=float(params["A"]), L=float(params["L"]), Nx=int(params["Nx"]), D=float(params["D"]),
         T=float(params["T"]), n=int(params["n"]), E0=float(params["E0"]), alpha=float(params["alpha"]),
@@ -61,28 +69,30 @@ def annotate_peaks(E, I):
 def qc_card(status, issues):
     color  = {"PASS":"#E8F5E9","WARN":"#FFF8E1","FAIL":"#FFEBEE"}[status]
     border = {"PASS":"#66BB6A","WARN":"#FFB300","FAIL":"#E53935"}[status]
-    issues_html = "".join("<li>"+it+"</li>" for it in issues) if issues else "<li>No issues detected</li>"
+    items = "".join(f"<li>{it}</li>" for it in issues) if issues else "<li>No issues detected</li>"
     html = (
-        "<div style='border:1px solid "+border+"; background:"+color+"; padding:12px; border-radius:8px;'>"
-        "<b>QC Status: "+status+"</b><br/>"
-        "<ul>"+issues_html+"</ul>"
+        "<div style='border:1px solid "+border+"; background:"+color+"; padding:12px; border-radius:10px;'>"
+        f"<b>QC Status: {status}</b><br/>"
+        f"<ul>{items}</ul>"
         "</div>"
     )
     st.markdown(html, unsafe_allow_html=True)
 
 def unit_scale(label_key: str):
-    """Unit selector widget; returns scale factor to convert to Amps."""
-    choice = st.selectbox(
-        "Current units in CSV",
-        ["A", "mA", "µA"],
-        index=0,
-        key=label_key
-    )
+    """Unit selector widget; returns scale factor to convert CSV current to Amps."""
+    choice = st.selectbox("Current units in CSV", ["A", "mA", "µA"], index=0, key=label_key)
     return {"A": 1.0, "mA": 1e-3, "µA": 1e-6}[choice]
 
-# -----------------------------
+
+# =========================
+# Sidebar: View Mode
+# =========================
+mode_view = st.sidebar.radio("View Mode", ["Basic", "Advanced"])
+
+
+# =========================
 # BASIC VIEW
-# -----------------------------
+# =========================
 if mode_view == "Basic":
     st.sidebar.subheader("Basic Controls")
     scan = st.sidebar.slider("Scan rate (V/s)", 0.01, 0.2, float(default["scan_rate"]))
@@ -90,8 +100,9 @@ if mode_view == "Basic":
 
     col1, col2 = st.columns(2)
 
-    # --- Left: quick simulation ---
+    # ---------- Left: Quick simulation ----------
     with col1:
+        st.subheader("Simulation")
         if st.button("Run Simulation", use_container_width=True):
             params = default.copy()
             params["scan_rate"] = float(scan)
@@ -101,38 +112,52 @@ if mode_view == "Basic":
             ox, red = annotate_peaks(E, I)
 
             fig, ax = plt.subplots(figsize=(6.5, 4.2))
-            ax.plot(E, I * 1e3, linewidth=1.6)
+            ax.plot(E, I * 1e3, linewidth=1.8)
             ax.scatter([ox[0], red[0]], [ox[1]*1e3, red[1]*1e3], s=25)
             ax.text(ox[0], ox[1]*1e3, f"Ox: {ox[0]:.2f} V", fontsize=9)
             ax.text(red[0], red[1]*1e3, f"Red: {red[0]:.2f} V", fontsize=9)
             ax.set_xlabel("Potential / V"); ax.set_ylabel("Current / mA"); ax.grid(True, alpha=0.3)
             st.pyplot(fig, clear_figure=True)
 
-    # --- Right: sample load + fit (with unit selector) ---
+    # ---------- Right: Sample load + Fit ----------
     with col2:
+        st.subheader("Sample Data Fit")
         if st.button("Load Sample Data & Fit", use_container_width=True):
             sample_path = project_root / "data" / "sample" / "sample_cv.csv"
 
-            # Unit selector and scale to Amps
+            # Units
             scale_basic = unit_scale("units_basic")
 
+            # Load & segment
             df = load_cv_csv(sample_path)
             df_sw = segment_sweeps(df)[0]
 
+            # Convert to Amps for fitting; plot in mA later for readability
             E_exp = df_sw["potential_V"].values
-            I_exp = df_sw["current_A"].values * scale_basic  # convert to A
+            I_exp = df_sw["current_A"].values * scale_basic
 
-            # Initial guess for fitting (reversible model)
+            # Fit (reversible model + auto-region selection + baseline)
             init = {
                 "A": default["A"], "L": default["L"], "Nx": default["Nx"], "D": default["D"], "T": default["T"],
                 "n": default["n"], "E0": default["E0"], "alpha": default["alpha"], "scan_rate": default["scan_rate"]
             }
             res = fit_parameters(E_exp, I_exp, init)
 
-            # Plot experimental vs fit (in mA for readability)
+            # Plot overlay
             fig, ax = plt.subplots(figsize=(6.5, 4.2))
             ax.plot(E_exp, I_exp * 1e3, label="Experimental", linewidth=1.2)
-            ax.plot(E_exp, res["I_fit"] * 1e3, label="Fit", linewidth=1.6)
+            ax.plot(E_exp, res["I_fit"] * 1e3, label="Fit", linewidth=1.8)
+            # Shade auto-selected region (if present)
+            try:
+                ylo = min(np.min(I_exp*1e3), np.min(res["I_fit"]*1e3)) - 0.1
+                yhi = max(np.max(I_exp*1e3), np.max(res["I_fit"]*1e3)) + 0.1
+                ax.fill_between(
+                    E_exp, ylo, yhi,
+                    where=res.get("mask", np.zeros_like(E_exp, dtype=bool)),
+                    alpha=0.10, step="mid", label="Fit window"
+                )
+            except Exception:
+                pass
             ax.set_xlabel("Potential / V"); ax.set_ylabel("Current / mA")
             ax.grid(True, alpha=0.3); ax.legend()
             st.pyplot(fig, clear_figure=True)
@@ -140,12 +165,14 @@ if mode_view == "Basic":
             # QC
             peak = max(1e-9, float(np.max(np.abs(I_exp))))
             rmse_pct = 100.0 * float(res["rmse"]) / peak
-            status, issues = qc_status(res["D"], rmse_pct)
-            qc_card(status, issues)
+            qc_card(*qc_status(res["D"], rmse_pct))
 
             # Diagnostics
             st.write(
-                f"**Fit metrics** | D = {res['D']:.2e} m²/s, E0 = {res['E0']:.3f} V, "
+                f"**Fit metrics** | "
+                f"D = {res['D']:.2e} m²/s, "
+                f"E0 = {res['E0']:.3f} V, "
+                f"bias = {res.get('b', 0.0):.2e} A, "
                 f"RMSE = {res['rmse']:.2e} A ({rmse_pct:.1f}%)"
             )
             residuals = (res["I_fit"] - I_exp)
@@ -155,10 +182,14 @@ if mode_view == "Basic":
             ax2.set_xlabel("Potential / V"); ax2.set_ylabel("Residual (mA)")
             ax2.grid(True, alpha=0.3)
             st.pyplot(fig2, clear_figure=True)
+            w = res.get("window_idx")
+            if w:
+                st.caption(f"Fitted region indices: {w[0]}–{w[1]} (auto-selected)")
 
-# -----------------------------
+
+# =========================
 # ADVANCED VIEW
-# -----------------------------
+# =========================
 else:
     st.sidebar.subheader("Advanced Controls")
     A  = st.sidebar.number_input("Area (m²)", value=float(default["A"]), format="%.6e")
@@ -173,7 +204,7 @@ else:
     E_vertex = st.sidebar.number_input("E vertex (V)", value=float(default["E_vertex"]))
     E_final  = st.sidebar.number_input("E final (V)", value=float(default["E_final"]))
     scan_rate = st.sidebar.number_input("Scan rate (V/s)", value=float(default["scan_rate"]))
-    boundary = st.sidebar.selectbox("Boundary Mode", ["reversible", "butler-volmer"])
+    boundary = st.sidebar.selectbox("Boundary Mode (simulation)", ["reversible", "butler-volmer"])
     k0 = st.sidebar.number_input("k0 (m/s) [BV only]", value=float(default["k0"]), format="%.2e")
 
     params = dict(
@@ -184,14 +215,15 @@ else:
 
     col1, col2 = st.columns(2)
 
-    # --- Left: simulate with chosen boundary ---
+    # ---------- Left: simulate with chosen boundary ----------
     with col1:
-        if st.button("Run Simulation", use_container_width=True):
+        st.subheader("Simulation")
+        if st.button("Run Simulation", key="adv_sim", use_container_width=True):
             t, E, I = run_sim(params, Nt=500, boundary=boundary)
             ox, red = annotate_peaks(E, I)
 
             fig, ax = plt.subplots(figsize=(6.5, 4.2))
-            ax.plot(E, I * 1e3, linewidth=1.6, label=f"Simulated ({boundary})")
+            ax.plot(E, I * 1e3, linewidth=1.8, label=f"Simulated ({boundary})")
             ax.scatter([ox[0], red[0]], [ox[1]*1e3, red[1]*1e3], s=25)
             ax.text(ox[0], ox[1]*1e3, f"Ox: {ox[0]:.2f} V", fontsize=9)
             ax.text(red[0], red[1]*1e3, f"Red: {red[0]:.2f} V", fontsize=9)
@@ -199,50 +231,58 @@ else:
             ax.grid(True, alpha=0.3); ax.legend()
             st.pyplot(fig, clear_figure=True)
 
-    # --- Right: upload + fit (reversible fitter) ---
+    # ---------- Right: upload + fit (reversible fitter) ----------
     with col2:
+        st.subheader("Upload & Fit (Reversible Model)")
         file = st.file_uploader("Upload CSV (time_s, potential_V, current_A)", type=["csv"])
-
-        # Unit selector for uploaded file
         scale_adv = unit_scale("units_adv")
 
-        if file is not None and st.button("Fit Parameters (D & E0, reversible)", use_container_width=True):
+        if file is not None and st.button("Fit Parameters (D & E0)", use_container_width=True):
             df = load_cv_csv(file)
             df_sw = segment_sweeps(df)[0]
 
             E_exp = df_sw["potential_V"].values
-            I_exp = df_sw["current_A"].values * scale_adv  # convert to A
+            I_exp = df_sw["current_A"].values * scale_adv
 
             init = {"A":A, "L":L, "Nx":int(Nx), "D":D, "T":T, "n":int(n), "E0":E0, "alpha":alpha, "scan_rate":scan_rate}
             res = fit_parameters(E_exp, I_exp, init)
 
             fig, ax = plt.subplots(figsize=(6.5, 4.2))
             ax.plot(E_exp, I_exp * 1e3, label="Experimental", linewidth=1.2)
-            ax.plot(E_exp, res["I_fit"] * 1e3, label="Fit (rev.)", linewidth=1.6)
+            ax.plot(E_exp, res["I_fit"] * 1e3, label="Fit (reversible)", linewidth=1.8)
+            # Shade auto-selected region (if present)
+            try:
+                ylo = min(np.min(I_exp*1e3), np.min(res["I_fit"]*1e3)) - 0.1
+                yhi = max(np.max(I_exp*1e3), np.max(res["I_fit"]*1e3)) + 0.1
+                ax.fill_between(
+                    E_exp, ylo, yhi,
+                    where=res.get("mask", np.zeros_like(E_exp, dtype=bool)),
+                    alpha=0.10, step="mid", label="Fit window"
+                )
+            except Exception:
+                pass
             ax.set_xlabel("Potential / V"); ax.set_ylabel("Current / mA")
             ax.grid(True, alpha=0.3); ax.legend()
             st.pyplot(fig, clear_figure=True)
 
             peak = max(1e-9, float(np.max(np.abs(I_exp))))
             rmse_pct = 100.0 * float(res["rmse"]) / peak
-            status, issues = qc_status(res["D"], rmse_pct)
-            qc_card(status, issues)
+            qc_card(*qc_status(res["D"], rmse_pct))
 
             st.write(
-                f"**Fit metrics** | D = {res['D']:.2e} m²/s, E0 = {res['E0']:.3f} V, "
+                f"**Fit metrics** | "
+                f"D = {res['D']:.2e} m²/s, "
+                f"E0 = {res['E0']:.3f} V, "
+                f"bias = {res.get('b', 0.0):.2e} A, "
                 f"RMSE = {res['rmse']:.2e} A ({rmse_pct:.1f}%)"
             )
             residuals = (res["I_fit"] - I_exp)
             fig2, ax2 = plt.subplots(figsize=(6.2, 2.8))
             ax2.axhline(0, linewidth=1)
-            ax2.plot(E_exp, residuals * 1e3, linewidth=1)  # mA
+            ax2.plot(E_exp, residuals * 1e3, linewidth=1)
             ax2.set_xlabel("Potential / V"); ax2.set_ylabel("Residual (mA)")
             ax2.grid(True, alpha=0.3)
             st.pyplot(fig2, clear_figure=True)
-
-# -----------------------------
-# Notes:
-# - Reversible model fitter is used for parameter extraction.
-# - If data shows kinetic asymmetry (BV behavior), simulation can be switched to BV in Advanced.
-#   We can add BV parameter fitting (k0) as a next enhancement if needed.
-# -----------------------------
+            w = res.get("window_idx")
+            if w:
+                st.caption(f"Fitted region indices: {w[0]}–{w[1]} (auto-selected)")
