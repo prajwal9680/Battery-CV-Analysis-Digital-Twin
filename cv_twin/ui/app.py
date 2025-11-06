@@ -79,6 +79,19 @@ if mode_view == 'Basic':
                     "<ul>"+issues_html+"</ul>"
                     "</div>")
             st.markdown(html, unsafe_allow_html=True)
+                        # ==== Diagnostics: Show fit metrics + residual plot ====
+            st.write(f"**Fit metrics**  |  D = {res['D']:.2e} m²/s,  E0 = {res['E0']:.3f} V,  RMSE = {res['rmse']:.2e} A ({rmse_pct:.1f}%)")
+
+            # Residuals vs Potential Plot
+            residuals = (res['I_fit'] - I_exp)
+            fig2, ax2 = plt.subplots(figsize=(6.2, 2.8))
+            ax2.axhline(0, linewidth=1)
+            ax2.plot(E_exp, residuals * 1e3, linewidth=1)  # Convert to mA for readability
+            ax2.set_xlabel('Potential / V')
+            ax2.set_ylabel('Residual (mA)')
+            ax2.grid(True, alpha=0.3)
+            st.pyplot(fig2, clear_figure=True)
+
 
 else:
     st.sidebar.subheader('Advanced Controls')
