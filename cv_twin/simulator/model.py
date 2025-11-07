@@ -90,8 +90,13 @@ def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> 
     - scan_rate: V/s for this sweep (assumed constant after preprocessing)
     - params: CVParams or dict
     """
-    if isinstance(params, dict):
-        params = CVParams(**params)
+    from dataclasses import fields as _dc_fields
+
+if isinstance(params, dict):
+    _allowed = {f.name for f in _dc_fields(CVParams)}
+    _filtered = {k: v for k, v in params.items() if k in _allowed}
+    params = CVParams(**_filtered)
+
 
     E = np.asarray(E, dtype=float)
     n = len(E)
