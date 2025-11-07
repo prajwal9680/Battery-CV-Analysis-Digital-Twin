@@ -38,6 +38,8 @@ class CVParams:
     # Solver
     max_iter: int = 15
     tol: float = 1e-9
+# Backwards compatibility: older UI code imports ModelParams
+ModelParams = CVParams
 
 
 def _scan_segments(E: np.ndarray) -> np.ndarray:
