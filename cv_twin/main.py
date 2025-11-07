@@ -42,3 +42,20 @@ I_model = simulate_cv(E, estimated_scan_rate, params)
 
 # quick check
 print("Simulated current stats:", float(np.min(I_model)), float(np.max(I_model)))
+from cv_twin.fitting.fit_b1 import fit_cv, FitConfig
+
+# 1) set your experimental scan rate here (example: 20 mV/s)
+scan_rate = 0.02  # V/s  ← CHANGE to your real value
+
+cfg_fit = FitConfig(
+    sweeps=(0, 1),     # fit first forward & reverse
+    scan_rate=scan_rate
+)
+
+result = fit_cv(df_clean, cfg_fit)
+
+print("Fit success:", result["success"])
+print("Message:", result["message"])
+print("R2:", round(result["metrics"]["r2"], 4), "  RMSE:", result["metrics"]["rmse"])
+print("Per-sweep:", result["per_sweep"])
+print("Best params:", result["params"])
