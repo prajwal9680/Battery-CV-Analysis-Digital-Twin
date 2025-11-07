@@ -156,3 +156,7 @@ def simulate_cv(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> np.
     if you later pass multiple sweeps).
     """
     return simulate_sweep(E, scan_rate, params)
+
+# Back-compat wrapper: older code imports `simulate`
+def simulate(E, scan_rate, params):
+    return simulate_cv(E, scan_rate, params)
