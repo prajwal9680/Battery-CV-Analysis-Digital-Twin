@@ -1,157 +1,156 @@
+# cv_twin/simulator/model.py
+"""
+CV Digital Twin — Step 2 (B1):
+General, robust simulator combining
+- Double-layer (capacitive / CPE-like) current
+- Simple Warburg diffusion tail (t^{-1/2} since last vertex)
+- Reversible redox peaks (anodic & cathodic) with adjustable width/offset
+- Ohmic drop (R_s) solved by fixed-point iteration
+
+Inputs: voltage array for a single sweep (monotonic), scan_rate (V/s), params
+Outputs: modeled current array matching E-grid of preprocessed sweep.
+
+Author: You + ChatGPT
+"""
+
+from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
-from typing import Literal
-from .waveform import triangle_wave, triangle_wave_times
+from typing import Dict, Tuple
 
-# Constants
-F = 96485.33212   # Faraday's constant (C/mol e-)
-R = 8.314462618   # Gas constant (J/mol K)
 
 @dataclass
-class ModelParams:
-    A: float = 1.0e-4        # Electrode area (m²)
-    L: float = 1.5e-4        # Diffusion layer thickness (m)
-    Nx: int = 90             # Number of spatial points
-    D: float = 1.0e-10       # Diffusion coefficient (m²/s)
-    T: float = 298.15        # Temperature (K)
-    n: int = 1               # Number of electrons
-    E0: float = 0.10         # Formal potential (V)
-    alpha: float = 0.5       # Transfer coefficient
-    CObulk: float = 1.0e-3   # Bulk oxidized species (mol/m³)
-    CRbulk: float = 0.0      # Bulk reduced species (mol/m³)
+class CVParams:
+    # Electrical / transport
+    Cdl: float = 1e-3          # F (double-layer capacitance)
+    R_s: float = 2.0           # ohm (solution/ohmic resistance)
+    # Warburg-like diffusion tail coefficient: A * sqrt(s) / V
+    k_w: float = 0.0           # set >0 if diffusion tails are visible
+    # Redox peak (general reversible-ish)
+    E0: float = 0.5            # V (formal potential)
+    peak_width: float = 0.035  # V (std dev of Gaussian peak)
+    peak_scale: float = 5e-4   # A (controls peak height)
+    peak_sep: float = 0.02     # V separation of anodic vs cathodic peak centers
+    peak_asym: float = 1.0     # anodic/cathodic amplitude ratio (1 = symmetric)
+    # Baseline (small residual slope/offset after preprocessing)
+    baseline_slope: float = 0.0   # A/V
+    baseline_offset: float = 0.0  # A
+    # Solver
+    max_iter: int = 15
+    tol: float = 1e-9
 
-    # CV settings
-    E_start: float = 0.00
-    E_vertex: float = 0.40
-    E_final: float = 0.00
-    scan_rate: float = 0.05   # V/s
 
-    # Mode selection
-    mode: Literal['reversible', 'butler-volmer'] = 'reversible'
-    k0: float = 5.0e-6        # Standard rate constant (for BV only)
+def _scan_segments(E: np.ndarray) -> np.ndarray:
+    """Return indices where scan direction flips (include start index 0)."""
+    dE = np.gradient(E)
+    sgn = np.sign(dE)
+    sgn[sgn == 0] = np.nan
+    sgn = np.where(np.isnan(sgn), np.interp(
+        np.flatnonzero(np.isnan(sgn)),
+        np.flatnonzero(~np.isnan(sgn)),
+        sgn[~np.isnan(sgn)]
+    ), sgn)
+    flips = np.where(np.diff(np.signbit(sgn)))[0] + 1
+    return np.unique(np.r_[0, flips, len(E)]).astype(int)
 
-def build_grid(L, Nx):
-    x = np.linspace(0.0, L, Nx)
-    dx = x[1] - x[0]
-    return x, dx
 
-def diffusion_laplacian(Nx, dx, D):
-    """Build Laplacian matrix for diffusion."""
-    lap = np.zeros((Nx, Nx))
-    for i in range(1, Nx - 1):
-        lap[i, i - 1] = 1.0
-        lap[i, i] = -2.0
-        lap[i, i + 1] = 1.0
-    lap[Nx - 1, Nx - 2] = 1.0
-    lap[Nx - 1, Nx - 1] = -1.0
-    return (D / dx ** 2) * lap
+def _warburg_tail(n_pts: int, dt: float) -> np.ndarray:
+    """
+    t^{-1/2} kernel since vertex (reset at segment starts).
+    Returns array w[t] ~ 1/sqrt(t+eps) normalized by dt^{1/2}.
+    """
+    t = np.arange(n_pts, dtype=float) * dt
+    return 1.0 / np.sqrt(t + 1e-6)
 
-def rhs_reversible(t, y, p, lap, dx):
-    """Right-hand side for reversible boundary condition (Nernst equilibrium)."""
-    Nx = p.Nx
-    CO = y[:Nx].copy()
-    CR = y[Nx:].copy()
 
-    E = triangle_wave(t, p.E_start, p.E_vertex, p.E_final, p.scan_rate)
+def _faradaic_peaks(E: np.ndarray, params: CVParams, direction: int) -> np.ndarray:
+    """
+    Simple reversible-like anodic/cathodic Gaussian peaks.
+    direction: +1 forward (increasing E), -1 reverse (decreasing E)
+    """
+    # centers separated around E0
+    Ea = params.E0 + params.peak_sep
+    Ec = params.E0 - params.peak_sep
+    ga = np.exp(-0.5 * ((E - Ea) / params.peak_width) ** 2)
+    gc = np.exp(-0.5 * ((E - Ec) / params.peak_width) ** 2)
+    # sign: anodic +, cathodic -
+    # direction slightly weights which peak dominates on each branch
+    w_a = 0.6 if direction > 0 else 0.4
+    w_c = 0.6 if direction < 0 else 0.4
+    I = params.peak_scale * (params.peak_asym * w_a * ga - w_c * gc)
+    return I
 
-    beta = (p.n * F) / (R * p.T)
-    ratio = np.exp(beta * (E - p.E0))
-    Csum = max(p.CObulk + p.CRbulk, 1e-12)
 
-    # Nernst at electrode surface
-    CO[0] = Csum * ratio / (1 + ratio)
-    CR[0] = Csum / (1 + ratio)
+def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> np.ndarray:
+    """
+    Simulate current for a single monotonic sweep.
+    - E: array of voltages (monotonic)
+    - scan_rate: V/s for this sweep (assumed constant after preprocessing)
+    - params: CVParams or dict
+    """
+    if isinstance(params, dict):
+        params = CVParams(**params)
 
-    dCOdt = lap @ CO
-    dCRdt = lap @ CR
+    E = np.asarray(E, dtype=float)
+    n = len(E)
+    if n < 3:
+        return np.zeros_like(E)
 
-    # Flux and current
-    J = -p.D * (CO[1] - CO[0]) / dx
-    I = p.n * F * p.A * J
+    # dt from constant scan rate and average dE
+    dE = np.gradient(E)
+    # keep sign of direction to label peaks
+    direction = 1 if (E[-1] - E[0]) >= 0 else -1
+    dt = np.mean(np.abs(dE)) / (abs(scan_rate) + 1e-12)
 
-    return np.concatenate([dCOdt, dCRdt]), I, E
+    # Build time-since-vertex vector (resets at scan flips)
+    segments = _scan_segments(E)
+    t_since = np.zeros(n, dtype=float)
+    for i in range(len(segments) - 1):
+        a, b = segments[i], segments[i + 1]
+        tloc = np.arange(b - a, dtype=float) * dt
+        t_since[a:b] = tloc
 
-def rhs_butler_volmer(t, y, p, lap, dx):
-    """Right-hand side for Butler–Volmer kinetic boundary."""
-    Nx = p.Nx
-    CO = y[:Nx].copy()
-    CR = y[Nx:].copy()
+    # Capacitive current (Cdl * dE/dt). Use sign of local slope.
+    I_cap = params.Cdl * scan_rate * np.sign(dE)
 
-    E = triangle_wave(t, p.E_start, p.E_vertex, p.E_final, p.scan_rate)
-    Csum = max(p.CObulk + p.CRbulk, 1e-12)
-
-    # Solve nonlinear surface condition
-    CO1 = CO[1]
-    CO0, CR0, J = _solve_surface_BV(Csum, CO1, p, dx, E)
-    CO[0] = CO0
-    CR[0] = CR0
-
-    dCOdt = lap @ CO
-    dCRdt = lap @ CR
-
-    I = p.n * F * p.A * J
-    return np.concatenate([dCOdt, dCRdt]), I, E
-
-def _solve_surface_BV(Csum, CO1, p, dx, E):
-    """Nonlinear solve for surface concentrations using charge transfer kinetics."""
-    from math import exp
-    beta = (p.n * F) / (R * p.T)
-    eta = E - p.E0
-
-    em = exp(-p.alpha * beta * eta)
-    ep = exp((1 - p.alpha) * beta * eta)
-
-    def f(CO0):
-        Jdiff = -p.D * (CO1 - CO0) / dx
-        Jbv = p.k0 * (CO0 * em - (Csum - CO0) * ep)
-        return Jdiff - Jbv
-
-    a, b = 0.0, Csum
-    for _ in range(60):
-        m = 0.5 * (a + b)
-        if f(a) * f(m) <= 0:
-            b = m
-        else:
-            a = m
-    CO0 = 0.5 * (a + b)
-    CR0 = Csum - CO0
-    J = -p.D * (CO1 - CO0) / dx
-    return CO0, CR0, J
-
-def simulate(p: ModelParams, Nt=500):
-    """Run the CV simulation and return (time, E(t), I(t))."""
-    from scipy.integrate import solve_ivp
-
-    x, dx = build_grid(p.L, p.Nx)
-    lap = diffusion_laplacian(p.Nx, dx, p.D)
-
-    t1, t2 = triangle_wave_times(p.E_start, p.E_vertex, p.E_final, p.scan_rate)
-    t_end = t2
-    t_eval = np.linspace(0, t_end, Nt)
-
-    y0 = np.zeros(2 * p.Nx)
-    y0[:p.Nx] = p.CObulk
-    y0[p.Nx:] = p.CRbulk
-
-    currents = []
-    potentials = []
-
-    if p.mode == 'reversible':
-        def _rhs(t, y):
-            dydt, I, E = rhs_reversible(t, y, p, lap, dx)
-            currents.append(I)
-            potentials.append(E)
-            return dydt
+    # Warburg tail (optional)
+    if params.k_w > 0:
+        I_w = np.zeros(n, dtype=float)
+        for i in range(len(segments) - 1):
+            a, b = segments[i], segments[i + 1]
+            w = _warburg_tail(b - a, dt)
+            I_w[a:b] = params.k_w * np.sign(scan_rate) * w
     else:
-        def _rhs(t, y):
-            dydt, I, E = rhs_butler_volmer(t, y, p, lap, dx)
-            currents.append(I)
-            potentials.append(E)
-            return dydt
+        I_w = 0.0
 
-    solve_ivp(_rhs, [0, t_end], y0, t_eval=t_eval, method='BDF', atol=1e-8, rtol=1e-5)
+    # Faradaic peaks
+    I_f = _faradaic_peaks(E, params, direction)
 
-    I = np.array(currents[:len(t_eval)])
-    E = np.array(potentials[:len(t_eval)])
+    # Baseline
+    I_base = params.baseline_offset + params.baseline_slope * (E - E[0])
 
-    return t_eval, E, I
+    # Combine without ohmic, then solve for ohmic drop: E_eff = E - I*R_s.
+    # Fixed-point iteration: I = f(E - R_s * I)
+    I = I_cap + I_w + I_f + I_base
+    if params.R_s > 0:
+        I_old = I.copy()
+        for _ in range(params.max_iter):
+            E_eff = E - params.R_s * I_old
+            # Update only the faradaic and baseline parts that depend on E (peaks shift with E)
+            I_f_eff = _faradaic_peaks(E_eff, params, direction)
+            I_new = params.Cdl * scan_rate * np.sign(dE) + I_w + I_f_eff + params.baseline_offset + params.baseline_slope * (E_eff - E_eff[0])
+            if np.max(np.abs(I_new - I_old)) < params.tol:
+                I_old = I_new
+                break
+            I_old = 0.5 * I_old + 0.5 * I_new  # damping for stability
+        I = I_old
+
+    return I
+
+
+def simulate_cv(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> np.ndarray:
+    """
+    Convenience wrapper: same as simulate_sweep (kept for API symmetry
+    if you later pass multiple sweeps).
+    """
+    return simulate_sweep(E, scan_rate, params)
