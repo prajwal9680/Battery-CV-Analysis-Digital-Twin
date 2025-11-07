@@ -46,11 +46,14 @@ class CVParams:
 # -------------------------------------------------
 # UI-facing params (what Streamlit constructs) -> map to CVParams
 # -------------------------------------------------
-@dataclass
+from dataclasses import dataclass, fields as _dc_fields
+
+@dataclass(init=False)
 class ModelParams:
     """
     Adapter class to accept fields the Streamlit UI passes
     and convert them to the internal CVParams used by the simulator.
+    This version also tolerates extra/unknown kwargs.
     """
     # Fields from the UI (not all are used by this simplified model)
     A: float = 1.0
@@ -60,6 +63,7 @@ class ModelParams:
     k0: float = 0.0
     scan_rate: float = 0.1
     mode: str = "reversible"
+    T: float = 298.15  # K (added to handle UI's 'T')
 
     # Our simplified simulator controls (map to CVParams)
     Cdl: float = 1e-3
@@ -74,6 +78,16 @@ class ModelParams:
     baseline_offset: float = 0.0
     max_iter: int = 15
     tol: float = 1e-9
+
+    def __init__(self, **kwargs):
+        # set defaults
+        for f in _dc_fields(ModelParams):
+            setattr(self, f.name, f.default)
+        # assign known keys; silently ignore unknowns
+        _known = {f.name for f in _dc_fields(ModelParams)}
+        for k, v in kwargs.items():
+            if k in _known:
+                setattr(self, k, v)
 
     def to_cv(self) -> CVParams:
         return CVParams(
@@ -90,7 +104,6 @@ class ModelParams:
             max_iter=self.max_iter,
             tol=self.tol,
         )
-
 
 # -----------------
 # Helper functions
