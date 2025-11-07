@@ -1,6 +1,7 @@
 # cv_twin/ui/app.py
 import sys
 from pathlib import Path
+from fitting.fit_bv import fit_parameters_bv
 
 # Make package imports work no matter how Streamlit runs
 project_root = Path(__file__).resolve().parents[1]
@@ -191,6 +192,10 @@ if mode_view == "Basic":
 # ADVANCED VIEW
 # =========================
 else:
+    # =========================
+# ADVANCED VIEW
+# =========================
+else:
     st.sidebar.subheader("Advanced Controls")
     A  = st.sidebar.number_input("Area (m²)", value=float(default["A"]), format="%.6e")
     L  = st.sidebar.number_input("Diffusion Length L (m)", value=float(default["L"]), format="%.6e")
@@ -231,13 +236,15 @@ else:
             ax.grid(True, alpha=0.3); ax.legend()
             st.pyplot(fig, clear_figure=True)
 
-    # ---------- Right: upload + fit (reversible fitter) ----------
+    # ---------- Right: upload + fit ----------
     with col2:
-        st.subheader("Upload & Fit (Reversible Model)")
+        st.subheader("Upload & Fit")
         file = st.file_uploader("Upload CSV (time_s, potential_V, current_A)", type=["csv"])
         scale_adv = unit_scale("units_adv")
 
-        if file is not None and st.button("Fit Parameters (D & E0)", use_container_width=True):
+        fit_model = st.selectbox("Fit Model", ["Reversible", "Butler–Volmer"])
+
+        if file is not None and st.button("Fit Data", use_container_width=True):
             df = load_cv_csv(file)
             df_sw = segment_sweeps(df)[0]
 
@@ -245,26 +252,34 @@ else:
             I_exp = df_sw["current_A"].values * scale_adv
 
             init = {"A":A, "L":L, "Nx":int(Nx), "D":D, "T":T, "n":int(n), "E0":E0, "alpha":alpha, "scan_rate":scan_rate}
-            res = fit_parameters(E_exp, I_exp, init)
 
+            if fit_model == "Reversible":
+                res = fit_parameters(E_exp, I_exp, init)
+                fit_label = "Fit (reversible)"
+            else:
+                res = fit_parameters_bv(E_exp, I_exp, init)
+                fit_label = "Fit (BV)"
+
+            # Plot overlay
             fig, ax = plt.subplots(figsize=(6.5, 4.2))
             ax.plot(E_exp, I_exp * 1e3, label="Experimental", linewidth=1.2)
-            ax.plot(E_exp, res["I_fit"] * 1e3, label="Fit (reversible)", linewidth=1.8)
-            # Shade auto-selected region (if present)
+            ax.plot(E_exp, res["I_fit"] * 1e3, label=fit_label, linewidth=1.8)
+
+            # Shade auto-fit region
             try:
                 ylo = min(np.min(I_exp*1e3), np.min(res["I_fit"]*1e3)) - 0.1
                 yhi = max(np.max(I_exp*1e3), np.max(res["I_fit"]*1e3)) + 0.1
-                ax.fill_between(
-                    E_exp, ylo, yhi,
-                    where=res.get("mask", np.zeros_like(E_exp, dtype=bool)),
-                    alpha=0.10, step="mid", label="Fit window"
-                )
-            except Exception:
+                ax.fill_between(E_exp, ylo, yhi,
+                    where=res.get("mask", np.zeros_like(E_exp, bool)),
+                    alpha=0.10, step="mid", label="Fit region")
+            except:
                 pass
+
             ax.set_xlabel("Potential / V"); ax.set_ylabel("Current / mA")
             ax.grid(True, alpha=0.3); ax.legend()
             st.pyplot(fig, clear_figure=True)
 
+            # QC + diagnostics
             peak = max(1e-9, float(np.max(np.abs(I_exp))))
             rmse_pct = 100.0 * float(res["rmse"]) / peak
             qc_card(*qc_status(res["D"], rmse_pct))
@@ -273,16 +288,20 @@ else:
                 f"**Fit metrics** | "
                 f"D = {res['D']:.2e} m²/s, "
                 f"E0 = {res['E0']:.3f} V, "
-                f"bias = {res.get('b', 0.0):.2e} A, "
+                f"bias = {res.get('b', 0):.2e} A, "
                 f"RMSE = {res['rmse']:.2e} A ({rmse_pct:.1f}%)"
             )
-            residuals = (res["I_fit"] - I_exp)
+
+            residuals = res["I_fit"] - I_exp
             fig2, ax2 = plt.subplots(figsize=(6.2, 2.8))
             ax2.axhline(0, linewidth=1)
             ax2.plot(E_exp, residuals * 1e3, linewidth=1)
             ax2.set_xlabel("Potential / V"); ax2.set_ylabel("Residual (mA)")
             ax2.grid(True, alpha=0.3)
             st.pyplot(fig2, clear_figure=True)
-            w = res.get("window_idx")
-            if w:
+
+            if res.get("window_idx"):
+                w = res["window_idx"]
                 st.caption(f"Fitted region indices: {w[0]}–{w[1]} (auto-selected)")
+
+  
