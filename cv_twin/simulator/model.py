@@ -15,10 +15,13 @@ Author: You + ChatGPT
 
 from __future__ import annotations
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as _dc_fields
 from typing import Dict, Tuple
 
 
+# ----------------------------
+# Internal simulator parameters
+# ----------------------------
 @dataclass
 class CVParams:
     # Electrical / transport
@@ -38,20 +41,74 @@ class CVParams:
     # Solver
     max_iter: int = 15
     tol: float = 1e-9
-# Backwards compatibility: older UI code imports ModelParams
-ModelParams = CVParams
 
 
+# -------------------------------------------------
+# UI-facing params (what Streamlit constructs) -> map to CVParams
+# -------------------------------------------------
+@dataclass
+class ModelParams:
+    """
+    Adapter class to accept fields the Streamlit UI passes
+    and convert them to the internal CVParams used by the simulator.
+    """
+    # Fields from the UI (not all are used by this simplified model)
+    A: float = 1.0
+    L: float = 1e-3
+    Nx: int = 200
+    D: float = 1e-10
+    k0: float = 0.0
+    scan_rate: float = 0.1
+    mode: str = "reversible"
+
+    # Our simplified simulator controls (map to CVParams)
+    Cdl: float = 1e-3
+    R_s: float = 2.0
+    k_w: float = 0.0
+    E0: float = 0.5
+    peak_width: float = 0.035
+    peak_scale: float = 5e-4
+    peak_sep: float = 0.02
+    peak_asym: float = 1.0
+    baseline_slope: float = 0.0
+    baseline_offset: float = 0.0
+    max_iter: int = 15
+    tol: float = 1e-9
+
+    def to_cv(self) -> CVParams:
+        return CVParams(
+            Cdl=self.Cdl,
+            R_s=self.R_s,
+            k_w=self.k_w,
+            E0=self.E0,
+            peak_width=self.peak_width,
+            peak_scale=self.peak_scale,
+            peak_sep=self.peak_sep,
+            peak_asym=self.peak_asym,
+            baseline_slope=self.baseline_slope,
+            baseline_offset=self.baseline_offset,
+            max_iter=self.max_iter,
+            tol=self.tol,
+        )
+
+
+# -----------------
+# Helper functions
+# -----------------
 def _scan_segments(E: np.ndarray) -> np.ndarray:
     """Return indices where scan direction flips (include start index 0)."""
     dE = np.gradient(E)
     sgn = np.sign(dE)
     sgn[sgn == 0] = np.nan
-    sgn = np.where(np.isnan(sgn), np.interp(
-        np.flatnonzero(np.isnan(sgn)),
-        np.flatnonzero(~np.isnan(sgn)),
-        sgn[~np.isnan(sgn)]
-    ), sgn)
+    sgn = np.where(
+        np.isnan(sgn),
+        np.interp(
+            np.flatnonzero(np.isnan(sgn)),
+            np.flatnonzero(~np.isnan(sgn)),
+            sgn[~np.isnan(sgn)],
+        ),
+        sgn,
+    )
     flips = np.where(np.diff(np.signbit(sgn)))[0] + 1
     return np.unique(np.r_[0, flips, len(E)]).astype(int)
 
@@ -83,21 +140,30 @@ def _faradaic_peaks(E: np.ndarray, params: CVParams, direction: int) -> np.ndarr
     return I
 
 
-def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> np.ndarray:
+# ---------------
+# Core simulator
+# ---------------
+def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict | ModelParams) -> np.ndarray:
     """
     Simulate current for a single monotonic sweep.
     - E: array of voltages (monotonic)
     - scan_rate: V/s for this sweep (assumed constant after preprocessing)
-    - params: CVParams or dict
+    - params: CVParams or dict or ModelParams
     """
-    from dataclasses import fields as _dc_fields
+    # Adapt incoming params:
+    if isinstance(params, ModelParams):
+        params = params.to_cv()
+        # prefer explicit scan_rate arg; fall back to the UI's value if needed
+        if scan_rate is None:
+            scan_rate = getattr(params, "scan_rate", 0.1)
 
-    if isinstance(params, dict):
-       _allowed = {f.name for f in _dc_fields(CVParams)}
-       _filtered = {k: v for k, v in params.items() if k in _allowed}
-       params = CVParams(**_filtered)
+    elif isinstance(params, dict):
+        # Filter unknown keys so **kwargs don’t break CVParams
+        _allowed = {f.name for f in _dc_fields(CVParams)}
+        _filtered = {k: v for k, v in params.items() if k in _allowed}
+        params = CVParams(**_filtered)
 
-
+    # Now run the model
     E = np.asarray(E, dtype=float)
     n = len(E)
     if n < 3:
@@ -145,7 +211,13 @@ def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> 
             E_eff = E - params.R_s * I_old
             # Update only the faradaic and baseline parts that depend on E (peaks shift with E)
             I_f_eff = _faradaic_peaks(E_eff, params, direction)
-            I_new = params.Cdl * scan_rate * np.sign(dE) + I_w + I_f_eff + params.baseline_offset + params.baseline_slope * (E_eff - E_eff[0])
+            I_new = (
+                params.Cdl * scan_rate * np.sign(dE)
+                + I_w
+                + I_f_eff
+                + params.baseline_offset
+                + params.baseline_slope * (E_eff - E_eff[0])
+            )
             if np.max(np.abs(I_new - I_old)) < params.tol:
                 I_old = I_new
                 break
@@ -155,13 +227,21 @@ def simulate_sweep(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> 
     return I
 
 
-def simulate_cv(E: np.ndarray, scan_rate: float, params: CVParams | Dict) -> np.ndarray:
+def simulate_cv(E: np.ndarray, scan_rate: float, params: CVParams | Dict | ModelParams) -> np.ndarray:
     """
     Convenience wrapper: same as simulate_sweep (kept for API symmetry
     if you later pass multiple sweeps).
     """
     return simulate_sweep(E, scan_rate, params)
 
+
 # Back-compat wrapper: older code imports `simulate`
 def simulate(E, scan_rate, params):
+    # If UI passed a ModelParams instance, adapt it to CVParams
+    if isinstance(params, ModelParams):
+        p_cv = params.to_cv()
+        sr = scan_rate if scan_rate is not None else getattr(params, "scan_rate", 0.1)
+        return simulate_cv(E, sr, p_cv)
+
+    # If a dict or CVParams was passed, simulate_cv handles it
     return simulate_cv(E, scan_rate, params)
